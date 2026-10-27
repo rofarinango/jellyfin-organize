@@ -1,0 +1,13 @@
+# Secrets
+config.json
+
+# Local data (personal activity)
+.infer_cache.json
+.sent_registry.json
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

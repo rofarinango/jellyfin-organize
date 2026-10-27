@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Organizar Jellyfin Content</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --border: #2a2e37; --text: #e6e8ec;
+    --muted: #8a8f98; --accent: #5b8cff; --ok: #3ecf8e; --err: #ff5c5c;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --card:#fff; --border:#dfe2e7; --text:#1b1f27; --muted:#6b7280; --accent:#3366ff; --ok:#1a9c5e; --err:#d13c3c; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0; padding: 24px; max-width: 1100px; margin-inline: auto;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  .row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .orig { font-weight: 600; font-size: 0.95rem; word-break: break-all; }
+  .size { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+  .fields { display: grid; grid-template-columns: 110px 1fr 90px 70px 70px; gap: 8px; margin-top: 12px; align-items: center; }
+  .fields label { font-size: 0.75rem; color: var(--muted); }
+  select, input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; font-size: 0.85rem; width: 100%;
+  }
+  .preview {
+    margin-top: 10px; font-size: 0.8rem; color: var(--accent); font-family: ui-monospace, monospace;
+    word-break: break-all;
+  }
+  .actions { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 8px 14px; font-size: 0.85rem; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 0.8rem; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  pre.log {
+    margin-top: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px; font-size: 0.75rem; max-height: 160px; overflow: auto; white-space: pre-wrap;
+  }
+  .empty { color: var(--muted); font-size: 0.9rem; }
+  .badge {
+    font-size: 0.7rem; padding: 2px 7px; border-radius: 10px; white-space: nowrap;
+    border: 1px solid var(--border);
+  }
+  .badge.low { color: #c9892a; border-color: #c9892a33; background: #c9892a1a; }
+  .badge.high { color: var(--ok); border-color: #3ecf8e33; background: #3ecf8e1a; }
+  .btn-secondary {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+  }
+  .tmdb-results {
+    margin-top: 8px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .tmdb-result {
+    text-align: left; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 10px; font-size: 0.82rem; cursor: pointer;
+  }
+  .tmdb-result:hover { border-color: var(--accent); }
+  .ai-cost { color: var(--muted); font-size: 0.75rem; }
+  .pill-sent {
+    font-size: 0.7rem; padding: 2px 8px; border-radius: 10px; white-space: nowrap;
+    color: var(--ok); border: 1px solid #3ecf8e33; background: #3ecf8e1a;
+  }
+  .progress-wrap {
+    margin-top: 10px; display: none;
+  }
+  .progress-bar {
+    height: 6px; background: var(--border); border-radius: 4px; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; width: 0%; background: var(--accent); transition: width 0.3s;
+  }
+  .progress-pct { font-size: 0.72rem; color: var(--muted); margin-top: 3px; }
+  .btn-danger {
+    background: transparent; color: var(--err); border: 1px solid #ff5c5c55;
+  }
+  .card.is-sent { opacity: 0.6; }
+</style>
+</head>
+<body>
+  <h1>Organizar Jellyfin Content</h1>
+  <div class="sub" id="sourceDir">Cargando...</div>
+  <div id="list"></div>
+
+<script>
+const sendQueue = [];
+let queueRunning = false;
+
+function enqueueSend(task) {
+  sendQueue.push(task);
+  processQueue();
+}
+
+async function processQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+  while (sendQueue.length > 0) {
+    const task = sendQueue.shift();
+    await task();
+  }
+  queueRunning = false;
+}
+
+async function loadFiles() {
+  const res = await fetch('/api/files');
+  const data = await res.json();
+  document.getElementById('sourceDir').textContent = 'Carpeta: ' + data.source_dir;
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  if (data.files.length === 0) {
+    list.innerHTML = '<div class="empty">No hay archivos en la carpeta.</div>';
+    return;
+  }
+  data.files.forEach(f => list.appendChild(renderCard(f)));
+}
+
+function pad2(n) {
+  n = parseInt(n, 10);
+  if (isNaN(n)) return '';
+  return n < 10 ? '0' + n : '' + n;
+}
+
+function computePreview(state) {
+  const { type, title, year, season, episode, ext } = state;
+  if (!title || !year) return '(completa título y año)';
+  if (type === 'movie') {
+    return `Movies/${title} (${year})/${title} (${year}).${ext}`;
+  }
+  if (!season || !episode) return '(completa temporada y episodio)';
+  const sp = pad2(season), ep = pad2(episode);
+  return `Shows/${title} (${year})/Season ${sp}/${title} S${sp}E${ep}.${ext}`;
+}
+
+function renderCard(f) {
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const state = { ...f.proposal, filename: f.filename };
+
+  const confidence = state.confidence || 'high';
+  const badgeLabel = confidence === 'low' ? 'revisa: detección poco confiable' : 'detección clara';
+
+  if (f.sent) card.classList.add('is-sent');
+
+  card.innerHTML = `
+    <div class="row-top">
+      <div class="orig">${f.filename}</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        ${f.sent ? '<span class="pill-sent">✅ Ya está en la Pi</span>' : `<span class="badge ${confidence}">${badgeLabel}</span>`}
+        <div class="size">${f.size_mb} MB</div>
+      </div>
+    </div>
+    <div class="fields">
+      <div>
+        <label>Tipo</label>
+        <select class="f-type">
+          <option value="movie" ${state.type==='movie'?'selected':''}>Película</option>
+          <option value="show" ${state.type==='show'?'selected':''}>Serie</option>
+        </select>
+      </div>
+      <div>
+        <label>Título</label>
+        <input class="f-title" value="${state.title}">
+      </div>
+      <div>
+        <label>Año</label>
+        <input class="f-year" value="${state.year}">
+      </div>
+      <div class="f-season-wrap">
+        <label>Temp.</label>
+        <input class="f-season" value="${state.season}">
+      </div>
+      <div class="f-episode-wrap">
+        <label>Epi.</label>
+        <input class="f-episode" value="${state.episode}">
+      </div>
+    </div>
+    <div class="preview"></div>
+    <div class="tmdb-results" style="display:none"></div>
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill"></div></div>
+      <div class="progress-pct"></div>
+    </div>
+    <div class="actions">
+      ${f.sent
+        ? '<button class="delete-btn btn-danger">🗑️ Borrar original en Mac</button>'
+        : '<button class="send-btn">Enviar a la Pi</button>'}
+      <button class="tmdb-btn btn-secondary">🔎 Buscar en TMDB</button>
+      <button class="ai-btn btn-secondary">✨ Inferir con IA</button>
+      <span class="status"></span>
+      <span class="ai-cost"></span>
+    </div>
+    <pre class="log" style="display:none"></pre>
+  `;
+
+  const typeEl = card.querySelector('.f-type');
+  const titleEl = card.querySelector('.f-title');
+  const yearEl = card.querySelector('.f-year');
+  const seasonEl = card.querySelector('.f-season');
+  const episodeEl = card.querySelector('.f-episode');
+  const seasonWrap = card.querySelector('.f-season-wrap');
+  const episodeWrap = card.querySelector('.f-episode-wrap');
+  const previewEl = card.querySelector('.preview');
+  const sendBtn = card.querySelector('.send-btn');
+  const deleteBtn = card.querySelector('.delete-btn');
+  const tmdbBtn = card.querySelector('.tmdb-btn');
+  const aiBtn = card.querySelector('.ai-btn');
+  const tmdbResultsEl = card.querySelector('.tmdb-results');
+  const statusEl = card.querySelector('.status');
+  const aiCostEl = card.querySelector('.ai-cost');
+  const logEl = card.querySelector('.log');
+  const progressWrapEl = card.querySelector('.progress-wrap');
+  const progressFillEl = card.querySelector('.progress-fill');
+  const progressPctEl = card.querySelector('.progress-pct');
+
+  function syncVisibility() {
+    const isShow = typeEl.value === 'show';
+    seasonWrap.style.display = isShow ? '' : 'none';
+    episodeWrap.style.display = isShow ? '' : 'none';
+  }
+
+  function refreshPreview() {
+    previewEl.textContent = computePreview({
+      type: typeEl.value,
+      title: titleEl.value.trim(),
+      year: yearEl.value.trim(),
+      season: seasonEl.value.trim(),
+      episode: episodeEl.value.trim(),
+      ext: state.ext,
+    });
+  }
+
+  [typeEl, titleEl, yearEl, seasonEl, episodeEl].forEach(el => {
+    el.addEventListener('input', () => { syncVisibility(); refreshPreview(); });
+  });
+
+  syncVisibility();
+  refreshPreview();
+
+  tmdbBtn.addEventListener('click', async () => {
+    tmdbBtn.disabled = true;
+    tmdbResultsEl.style.display = 'none';
+    tmdbResultsEl.innerHTML = '';
+    statusEl.textContent = 'Buscando en TMDB...';
+    statusEl.className = 'status';
+    try {
+      const q = encodeURIComponent(titleEl.value.trim());
+      const kind = typeEl.value;
+      const res = await fetch(`/api/tmdb_search?query=${q}&type=${kind}`);
+      const data = await res.json();
+      statusEl.textContent = '';
+      if (!data.success) {
+        statusEl.textContent = 'TMDB: ' + data.log;
+        statusEl.className = 'status err';
+        return;
+      }
+      if (data.results.length === 0) {
+        statusEl.textContent = 'Sin resultados en TMDB';
+        statusEl.className = 'status';
+        return;
+      }
+      data.results.forEach(r => {
+        const btn = document.createElement('button');
+        btn.className = 'tmdb-result';
+        btn.textContent = `${r.title} (${r.year || '¿año?'})`;
+        btn.addEventListener('click', () => {
+          titleEl.value = r.title;
+          yearEl.value = r.year;
+          refreshPreview();
+          tmdbResultsEl.style.display = 'none';
+        });
+        tmdbResultsEl.appendChild(btn);
+      });
+      tmdbResultsEl.style.display = 'flex';
+    } catch (e) {
+      statusEl.textContent = 'Error de red consultando TMDB';
+      statusEl.className = 'status err';
+    } finally {
+      tmdbBtn.disabled = false;
+    }
+  });
+
+  aiBtn.addEventListener('click', async () => {
+    aiBtn.disabled = true;
+    statusEl.textContent = 'Preguntando a Claude...';
+    statusEl.className = 'status';
+    aiCostEl.textContent = '';
+    try {
+      const res = await fetch('/api/infer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: state.filename }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        statusEl.textContent = 'IA: ' + data.log;
+        statusEl.className = 'status err';
+        return;
+      }
+      const p = data.proposal;
+      typeEl.value = p.type;
+      titleEl.value = p.title;
+      if (p.year) yearEl.value = p.year;
+      if (p.type === 'show') {
+        if (p.season != null) seasonEl.value = p.season;
+        if (p.episode != null) episodeEl.value = p.episode;
+      }
+      syncVisibility();
+      refreshPreview();
+      statusEl.textContent = `IA (confianza: ${p.confidence})`;
+      statusEl.className = 'status ok';
+      const costNote = data.cached ? 'ya en caché, sin costo nuevo' : `~$${(data.cost_usd || 0).toFixed(2)} de tu cuota`;
+      aiCostEl.textContent = costNote;
+    } catch (e) {
+      statusEl.textContent = 'Error de red consultando la IA';
+      statusEl.className = 'status err';
+    } finally {
+      aiBtn.disabled = false;
+    }
+  });
+
+  function markSent() {
+    card.classList.add('is-sent');
+    const badgeArea = card.querySelector('.row-top > div:last-child');
+    const existingBadge = badgeArea.querySelector('.badge');
+    if (existingBadge) existingBadge.remove();
+    const pill = document.createElement('span');
+    pill.className = 'pill-sent';
+    pill.textContent = '✅ Ya está en la Pi';
+    badgeArea.prepend(pill);
+    sendBtn.remove();
+    const newDeleteBtn = document.createElement('button');
+    newDeleteBtn.className = 'delete-btn btn-danger';
+    newDeleteBtn.textContent = '🗑️ Borrar original en Mac';
+    newDeleteBtn.addEventListener('click', onDeleteClick);
+    card.querySelector('.actions').prepend(newDeleteBtn);
+  }
+
+  async function pollJob(jobId) {
+    return new Promise((resolve) => {
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/send_status?job_id=${jobId}`);
+          const data = await res.json();
+          if (!data.success) {
+            clearInterval(interval);
+            statusEl.textContent = 'Error: ' + data.log;
+            statusEl.className = 'status err';
+            resolve();
+            return;
+          }
+          if (data.bytes_total) {
+            const pct = data.percent || 0;
+            progressFillEl.style.width = pct + '%';
+            const mbDone = (data.bytes_done / (1024 * 1024)).toFixed(0);
+            const mbTotal = (data.bytes_total / (1024 * 1024)).toFixed(0);
+            progressPctEl.textContent = `${pct}% (${mbDone} / ${mbTotal} MB)`;
+          }
+          logEl.textContent = data.log;
+          logEl.style.display = 'block';
+
+          if (data.status === 'done' || data.status === 'error') {
+            clearInterval(interval);
+            statusEl.textContent = data.status === 'done' ? 'Listo ✓' : 'Error';
+            statusEl.className = 'status ' + (data.status === 'done' ? 'ok' : 'err');
+            if (data.status === 'done') markSent();
+            resolve();
+          }
+        } catch (e) {
+          clearInterval(interval);
+          statusEl.textContent = 'Error de red consultando progreso';
+          statusEl.className = 'status err';
+          resolve();
+        }
+      }, 700);
+    });
+  }
+
+  if (sendBtn) {
+    sendBtn.addEventListener('click', () => {
+      sendBtn.disabled = true;
+      statusEl.textContent = 'En cola...';
+      statusEl.className = 'status';
+      logEl.style.display = 'none';
+      progressWrapEl.style.display = 'block';
+      progressFillEl.style.width = '0%';
+      progressPctEl.textContent = '';
+
+      enqueueSend(async () => {
+        statusEl.textContent = 'Iniciando...';
+        const payload = {
+          filename: state.filename,
+          type: typeEl.value,
+          title: titleEl.value.trim(),
+          year: yearEl.value.trim(),
+          season: seasonEl.value.trim(),
+          episode: episodeEl.value.trim(),
+        };
+        try {
+          const res = await fetch('/api/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (!data.success) {
+            statusEl.textContent = 'Error: ' + data.log;
+            statusEl.className = 'status err';
+            sendBtn.disabled = false;
+            return;
+          }
+          statusEl.textContent = 'Enviando...';
+          await pollJob(data.job_id);
+        } catch (e) {
+          statusEl.textContent = 'Error de red';
+          statusEl.className = 'status err';
+        } finally {
+          sendBtn.disabled = false;
+        }
+      });
+    });
+  }
+
+  async function onDeleteClick() {
+    if (!confirm(`¿Seguro que quieres borrar el archivo original en tu Mac?\n\n${state.filename}\n\nYa fue transferido y verificado en la Pi.`)) return;
+    const btn = card.querySelector('.delete-btn');
+    btn.disabled = true;
+    statusEl.textContent = 'Borrando...';
+    statusEl.className = 'status';
+    try {
+      const res = await fetch('/api/delete_source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: state.filename }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        card.remove();
+      } else {
+        statusEl.textContent = 'Error: ' + data.log;
+        statusEl.className = 'status err';
+        btn.disabled = false;
+      }
+    } catch (e) {
+      statusEl.textContent = 'Error de red borrando';
+      statusEl.className = 'status err';
+      btn.disabled = false;
+    }
+  }
+
+  if (deleteBtn) deleteBtn.addEventListener('click', onDeleteClick);
+
+  return card;
+}
+
+loadFiles();
+</script>
+</body>
+</html>
